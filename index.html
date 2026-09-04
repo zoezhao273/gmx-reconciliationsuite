@@ -247,9 +247,13 @@
   .wl-body{ display:none; margin-top:14px }
   .wl-card.open .wl-body{ display:block }
   .wl-intro{ margin:0 0 10px; color:var(--ink-2); font-size:13px; line-height:1.55 }
-  .wl-search{ width:100%; padding:8px 11px; border:1px solid var(--line); border-radius:8px;
-    font:inherit; font-size:13px; background:var(--bg); box-sizing:border-box; margin-bottom:10px }
-  .wl-search:focus{ outline:none; border-color:var(--teal); background:#fff }
+  .wl-colf{ display:block; width:100%; margin-top:6px; box-sizing:border-box; font:inherit; font-size:12px;
+    text-transform:none; letter-spacing:normal; font-weight:400; color:var(--ink); background:#fff;
+    border:1px solid var(--line); border-radius:6px; padding:5px 7px }
+  .wl-colf::placeholder{ color:var(--mute); font-weight:400; text-transform:none }
+  .wl-colf:focus{ outline:none; border-color:var(--teal); background:#fff }
+  .wl-colf-sel{ cursor:pointer; padding:5px 4px }
+  #wlfUuid{ font-family:var(--mono); font-size:11px }
   .sync-status{ font-size:12px; padding:5px 11px; border-radius:20px; font-weight:600; display:inline-flex;
     align-items:center; gap:6px; white-space:nowrap; flex-shrink:0 }
   .sync-status.ok{ background:var(--teal-soft); color:var(--teal-press) }
@@ -277,7 +281,7 @@
     font:inherit; font-size:12.5px; padding:6px; border-radius:6px; box-sizing:border-box }
   .wl-table input[type=text]:focus{ border-color:var(--line); background:var(--bg); outline:none }
   .wl-table .c-uuid input{ font-family:var(--mono); font-size:11.5px }
-  .wl-table .c-rev{ text-align:center; width:84px } .wl-table .c-rev input{ width:16px; height:16px; cursor:pointer; accent-color:var(--teal) }
+  .wl-table .c-rev{ text-align:center; width:112px } .wl-table .c-rev input[type=checkbox]{ width:16px; height:16px; cursor:pointer; accent-color:var(--teal) }
   .wl-table .c-del{ width:36px; text-align:center }
   .wl-del{ border:none; background:transparent; color:var(--mute); cursor:pointer; font-size:16px; line-height:1; padding:4px }
   .wl-del:hover{ color:var(--err) }
@@ -1724,10 +1728,14 @@ main{ padding:18px 0 64px }
       </button>
       <div class="wl-body" id="wlBodyWrap">
         <p class="wl-intro">Each row holds a <b>UUID, a DocNo., or a foreign-invoice number.</b> Reviewed entries are exempt from <b>every</b> check &mdash; a standard SAT UUID exempts that invoice wherever it appears; a DocNo. exempts the whole expense record; and any other value (e.g. a <b>foreign invoice</b> such as <code>26427000000277781101</code> or <code>ZSPE26021337A</code> that has no CFDI) is matched against the NCC invoice-number column, so it exempts that line even though it can't be found in the CFDI file. The list lives in a shared cloud store, so the whole team sees the same one — it loads automatically; edit it and press <b>Save to Cloud</b> to share. Only rows whose <b>Reviewed</b> box is ticked take effect.</p>
-        <input type="text" class="wl-search" id="wlSearch" spellcheck="false" placeholder="Filter by UUID / DocNo. or reason&hellip;">
         <div class="wl-tablewrap">
           <table class="wl-table" id="wlTable">
-            <thead><tr><th>UUID / DocNo.</th><th>Reason for exemption</th><th class="c-rev">Reviewed</th><th class="c-del"></th></tr></thead>
+            <thead><tr>
+              <th>UUID / DocNo.<input type="text" class="wl-colf" id="wlfUuid" spellcheck="false" placeholder="filter&hellip;"></th>
+              <th>Reason for exemption<input type="text" class="wl-colf" id="wlfReason" spellcheck="false" placeholder="filter&hellip;"></th>
+              <th class="c-rev">Reviewed<select class="wl-colf wl-colf-sel" id="wlfRev"><option value="">All</option><option value="1">&#10003; Reviewed</option><option value="0">Unreviewed</option></select></th>
+              <th class="c-del"></th>
+            </tr></thead>
             <tbody id="wlBody"></tbody>
           </table>
         </div>
@@ -3066,13 +3074,18 @@ function renderWhitelist(){
   applyWlFilter();
 }
 function applyWlFilter(){
-  const box=document.getElementById('wlSearch'); if(!box) return;
-  const q=(box.value||'').trim().toLowerCase();
+  const uEl=document.getElementById('wlfUuid'), rEl=document.getElementById('wlfReason'), vEl=document.getElementById('wlfRev');
+  if(!uEl||!rEl||!vEl) return;
+  const qu=(uEl.value||'').trim().toLowerCase();      // UUID / DocNo. substring
+  const qr=(rEl.value||'').trim().toLowerCase();      // reason substring
+  const qv=vEl.value;                                 // '' = all · '1' = reviewed only · '0' = unreviewed only
   document.querySelectorAll('#wlBody tr').forEach(tr=>{
     if(tr.classList.contains('wl-empty')) return;
-    const u=tr.querySelector('[data-f="uuid"]'), r=tr.querySelector('[data-f="reason"]');
-    const hay=((u?u.value:'')+' '+(r?r.value:'')).toLowerCase();
-    tr.style.display = (!q || hay.includes(q)) ? '' : 'none';
+    const u=tr.querySelector('[data-f="uuid"]'), r=tr.querySelector('[data-f="reason"]'), c=tr.querySelector('[data-f="reviewed"]');
+    const okU = !qu || (u?u.value:'').toLowerCase().includes(qu);
+    const okR = !qr || (r?r.value:'').toLowerCase().includes(qr);
+    const okV = !qv || (c && c.checked ? qv==='1' : qv==='0');
+    tr.style.display = (okU && okR && okV) ? '' : 'none';
   });
 }
 
@@ -3131,13 +3144,17 @@ async function saveWhitelistToCloud(){
     const open=card.classList.toggle('open');
     document.getElementById('wlToggle').setAttribute('aria-expanded', open?'true':'false');
   });
-  document.getElementById('wlSearch').addEventListener('input', applyWlFilter);
+  document.getElementById('wlfUuid').addEventListener('input', applyWlFilter);
+  document.getElementById('wlfReason').addEventListener('input', applyWlFilter);
+  document.getElementById('wlfRev').addEventListener('change', applyWlFilter);
   const body=document.getElementById('wlBody');
   body.addEventListener('input', e=>{ const t=e.target; if(t.dataset && (t.dataset.f==='uuid'||t.dataset.f==='reason')){ whitelist[+t.dataset.i][t.dataset.f]=t.value; if(t.dataset.f==='uuid'){ wlUpdateCount(); applyWlFilter(); } } });
-  body.addEventListener('change', e=>{ const t=e.target; if(t.dataset && t.dataset.f==='reviewed'){ whitelist[+t.dataset.i].reviewed=t.checked; wlUpdateCount(); } });
+  body.addEventListener('change', e=>{ const t=e.target; if(t.dataset && t.dataset.f==='reviewed'){ whitelist[+t.dataset.i].reviewed=t.checked; wlUpdateCount(); applyWlFilter(); } });
   body.addEventListener('click', e=>{ const b=e.target.closest('.wl-del'); if(b){ whitelist.splice(+b.dataset.del,1); renderWhitelist(); } });
   document.getElementById('wlAdd').addEventListener('click', ()=>{
-    document.getElementById('wlSearch').value='';     // clear filter so the new row is visible
+    document.getElementById('wlfUuid').value='';       // clear filters so the new row is visible
+    document.getElementById('wlfReason').value='';
+    document.getElementById('wlfRev').value='';
     whitelist.push({uuid:'',reason:'',reviewed:false}); renderWhitelist();
     const ins=document.querySelectorAll('#wlBody .c-uuid input'); if(ins.length) ins[ins.length-1].focus(); });
   document.getElementById('wlSave').addEventListener('click', saveWhitelistToCloud);
