@@ -1743,6 +1743,7 @@ main{ padding:18px 0 64px }
           <button type="button" class="wl-btn ghost" id="wlAdd">+ Add row</button>
           <button type="button" class="wl-btn" id="wlSave">&#9729;&#65039; Save to Cloud</button>
           <button type="button" class="wl-btn ghost" id="wlReload">&#8635; Reload</button>
+          <button type="button" class="wl-btn ghost" id="wlBackups" title="Download every whitelist snapshot this browser has seen">&#8615; Download backups</button>
         </div>
         <div class="wl-status" id="wlStatus"></div>
       </div>
@@ -2228,7 +2229,7 @@ main{ padding:18px 0 64px }
   </section>
 </main>
 
-<footer>Runs entirely in your browser &middot; no file ever leaves your computer. &middot; <span id="buildStamp" style="opacity:.6">Build 2026-07-16</span></footer>
+<footer>Runs entirely in your browser &middot; no file ever leaves your computer. &middot; <span id="buildStamp" style="opacity:.6">Build 2026-11-12</span></footer>
 
 <script>
 const WHT_CODE = 'PresetWHTL0 Donot used';
@@ -3110,33 +3111,118 @@ async function gsSet(key,value){
   // no-cors avoids the preflight Apps Script can't answer; response is opaque, so we assume success
   await fetch(wlEndpoint(),{ method:'POST', mode:'no-cors', headers:{'Content-Type':'text/plain'}, body:JSON.stringify({key,value}) });
 }
+/* ---- safety layer (2026-11 fix for lost whitelist rows) ----
+   Old behaviour: Save overwrote the WHOLE cloud list with this tab's copy. Rows were lost when
+   (a) a colleague saved in between (stale tab overwrote their rows), or
+   (b) the initial load failed / was still running, so the tab saved an almost-empty list.
+   Now: Save is blocked until a load has succeeded; Save re-reads the cloud and does a 3-way merge
+   (cloud-now vs. what this tab loaded vs. this tab's edits); large shrinks need confirmation;
+   the write is verified by reading it back; every cloud snapshot is backed up in localStorage. */
+let wlBase = null;          // Map key -> entry, the cloud list as this tab last loaded/saved it (null = never loaded OK)
+let wlLoading = false;
+const wlKeyOf = w => normUuid(String((w&&w.uuid)||'').trim()).toUpperCase();
+const wlSame  = (a,b) => a.uuid===b.uuid && a.reason===b.reason && a.reviewed===b.reviewed;
+function wlToMap(list){ const m=new Map(); for(const w of list){ const e=wlNormalizeEntry(w); const k=wlKeyOf(e); if(k && !m.has(k)) m.set(k,e); } return m; }
+function wlIsDirty(){
+  if(!wlBase) return false;
+  const cur=wlToMap(whitelist.filter(w=>String(w.uuid||'').trim()));
+  return cur.size!==wlBase.size || [...cur].some(([k,v])=>!wlBase.has(k)||!wlSame(v,wlBase.get(k)));
+}
+function wlSetSaveEnabled(){ const b=document.getElementById('wlSave'); if(b) b.disabled = wlLoading || !wlBase; }
+const WL_BK_KEY='wlBackups_v1';
+function wlBackup(tag,list){
+  try{
+    const arr=JSON.parse(localStorage.getItem(WL_BK_KEY)||'[]');
+    const last=arr[arr.length-1];
+    const json=JSON.stringify(list);
+    if(last && last.json===json) return;                 // skip identical consecutive snapshots
+    arr.push({at:new Date().toISOString(), tag, n:list.length, json});
+    while(arr.length>30) arr.shift();
+    localStorage.setItem(WL_BK_KEY, JSON.stringify(arr));
+  }catch(e){ /* storage unavailable - ignore */ }
+}
+function wlDownloadBackups(){
+  let arr=[]; try{ arr=JSON.parse(localStorage.getItem(WL_BK_KEY)||'[]'); }catch(e){}
+  const out=arr.map(b=>({at:b.at, tag:b.tag, count:b.n, whitelist:JSON.parse(b.json)}));
+  out.push({at:new Date().toISOString(), tag:'current-screen', count:whitelist.length, whitelist});
+  const blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='whitelist-backups-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+}
+async function gsGetList(){
+  const data=await gsGet();
+  const arr=data[WL_KEY];
+  if(arr==null) return [];
+  if(!Array.isArray(arr)) throw new Error('cloud value for "'+WL_KEY+'" is not a list ('+typeof arr+')');
+  return arr.map(wlNormalizeEntry);
+}
 async function loadWhitelistFromCloud(){
+  wlLoading=true; wlSetSaveEnabled();
   wlSync('loading','Loading\u2026'); wlSetStatus('');
   try{
-    const data=await gsGet();
-    const arr=data[WL_KEY];
-    whitelist = Array.isArray(arr) ? arr.map(wlNormalizeEntry) : [];
+    const list=await gsGetList();
+    whitelist=list.map(w=>({...w}));
+    wlBase=wlToMap(list);
+    wlBackup('load',list);
     renderWhitelist();
-    wlSync('ok','Cloud sync OK \u00b7 '+wlApprovedCount()+' approved');
+    wlSync('ok','Cloud sync OK \u00b7 '+wlApprovedCount()+' approved \u00b7 '+list.length+' rows');
   }catch(e){
     wlSync('err','Cloud unavailable \u2014 offline');
-    wlSetStatus('Couldn\u2019t reach the cloud ('+e.message+'). You can still edit the whitelist locally; your changes just won\u2019t sync until the connection is back.','bad');
+    wlSetStatus('Couldn\u2019t load the shared list ('+e.message+'). Saving is disabled until Reload succeeds, so an incomplete list can\u2019t overwrite the cloud.','bad');
+  }finally{ wlLoading=false; wlSetSaveEnabled(); }
+}
+/* 3-way merge. local wins for rows this tab added/edited/deleted; rows added or changed by others are kept. */
+function wlMerge(cloudNow, base, localList){
+  const C=wlToMap(cloudNow), L=wlToMap(localList), out=new Map(), conflicts=[];
+  for(const [k,l] of L){
+    const b=base.get(k), c=C.get(k);
+    if(b && c && wlSame(l,b) && !wlSame(c,b)) out.set(k,c);        // untouched here, edited elsewhere -> take theirs
+    else { if(b && c && !wlSame(l,b) && !wlSame(c,b) && !wlSame(l,c)) conflicts.push(k); out.set(k,l); }
   }
+  for(const [k,c] of C){
+    if(out.has(k)) continue;
+    const b=base.get(k);
+    if(!b) out.set(k,c);                                           // added by someone else -> keep
+    else if(!wlSame(c,b)) { out.set(k,c); conflicts.push(k); }     // deleted here but edited elsewhere -> keep theirs
+    /* else: deleted here, untouched elsewhere -> drop */
+  }
+  return {list:[...out.values()], conflicts};
 }
 async function saveWhitelistToCloud(){
+  if(!wlBase){ wlSetStatus('Load the shared list first (press Reload) \u2014 saving without it would overwrite colleagues\u2019 rows.','bad'); return; }
   const btn=document.getElementById('wlSave'), orig=btn.innerHTML;
   btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Saving\u2026';
   wlSync('loading','Saving\u2026'); wlSetStatus('');
   try{
-    const clean=whitelist.filter(w=>String(w.uuid||'').trim()!=='').map(wlNormalizeEntry);
-    await gsSet(WL_KEY, clean);
-    whitelist=clean; renderWhitelist();
-    wlSync('ok','Saved \u2713 '+new Date().toLocaleTimeString());
-    wlSetStatus('Saved to the shared cloud. Colleagues see it after they open the page or press Reload.','ok');
+    const local=whitelist.filter(w=>String(w.uuid||'').trim()!=='').map(wlNormalizeEntry);
+    const cloudNow=await gsGetList();                     // fresh read right before writing
+    wlBackup('pre-save cloud',cloudNow);
+    const {list:merged, conflicts}=wlMerge(cloudNow, wlBase, local);
+    const cMap=wlToMap(cloudNow), mKeys=new Set(merged.map(wlKeyOf));
+    const removedKeys=[...cMap.keys()].filter(k=>!mKeys.has(k));
+    if(removedKeys.length>=5 || (cMap.size>=10 && merged.length < cMap.size*0.8)){
+      if(!confirm('This save would remove '+removedKeys.length+' row(s) from the shared whitelist ('+cMap.size+' \u2192 '+merged.length+'):\n'+removedKeys.slice(0,10).join('\n')+(removedKeys.length>10?'\n\u2026':'')+'\n\nContinue?')){
+        wlSync('ok','Save cancelled'); wlSetStatus('Nothing was saved.',''); return;
+      }
+    }
+    await gsSet(WL_KEY, merged);
+    // no-cors gives no response, so read back to confirm the write really landed
+    const check=await gsGetList();
+    const C=wlToMap(check), missing=merged.filter(m=>{ const c=C.get(wlKeyOf(m)); return !c || !wlSame(c,m); });
+    whitelist=check.map(w=>({...w})); wlBase=wlToMap(check); wlBackup('post-save',check); renderWhitelist();
+    if(missing.length){
+      wlSync('err','Save NOT confirmed');
+      wlSetStatus('The cloud did not keep '+missing.length+' row(s) (e.g. '+missing.slice(0,3).map(m=>m.uuid).join(', ')+'). The store may have hit a size limit or rejected the write \u2014 use \u201cDownload backups\u201d and check the Apps Script.','bad');
+    } else {
+      wlSync('ok','Saved \u2713 '+new Date().toLocaleTimeString()+' \u00b7 '+check.length+' rows');
+      const others=check.length-local.length;
+      wlSetStatus('Saved and verified. '+(others>0?others+' row(s) added by colleagues were kept. ':'')+(conflicts.length?'Edited by both you and someone else (yours kept): '+conflicts.join(', '):''),'ok');
+    }
   }catch(e){
     wlSync('err','Save failed');
-    wlSetStatus('Save failed: '+e.message+'. The shared store may be temporarily unreachable \u2014 try Reload, then save again.','bad');
-  }finally{ btn.disabled=false; btn.innerHTML=orig; }
+    wlSetStatus('Save failed: '+e.message+'. Nothing was overwritten blindly \u2014 try Reload, then save again.','bad');
+  }finally{ btn.innerHTML=orig; wlSetSaveEnabled(); }
 }
 (function wireWhitelist(){
   const card=document.getElementById('wlCard');
@@ -3158,7 +3244,13 @@ async function saveWhitelistToCloud(){
     whitelist.push({uuid:'',reason:'',reviewed:false}); renderWhitelist();
     const ins=document.querySelectorAll('#wlBody .c-uuid input'); if(ins.length) ins[ins.length-1].focus(); });
   document.getElementById('wlSave').addEventListener('click', saveWhitelistToCloud);
-  document.getElementById('wlReload').addEventListener('click', loadWhitelistFromCloud);
+  document.getElementById('wlReload').addEventListener('click', ()=>{
+    if(wlIsDirty() && !confirm('Reload replaces what is on screen with the cloud copy. Unsaved edits here will be lost. Continue?')) return;
+    loadWhitelistFromCloud(); });
+  document.getElementById('wlBackups').addEventListener('click', wlDownloadBackups);
+  window.addEventListener('beforeunload', e=>{
+    if(wlIsDirty()){ e.preventDefault(); e.returnValue=''; }
+  });
   renderWhitelist();
   loadWhitelistFromCloud();   // auto-load the shared list on open
 })();
