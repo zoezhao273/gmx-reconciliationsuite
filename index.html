@@ -1743,7 +1743,6 @@ main{ padding:18px 0 64px }
           <button type="button" class="wl-btn ghost" id="wlAdd">+ Add row</button>
           <button type="button" class="wl-btn" id="wlSave">&#9729;&#65039; Save to Cloud</button>
           <button type="button" class="wl-btn ghost" id="wlReload">&#8635; Reload</button>
-          <button type="button" class="wl-btn ghost" id="wlBackups" title="Download every whitelist snapshot this browser has seen">&#8615; Download backups</button>
         </div>
         <div class="wl-status" id="wlStatus"></div>
       </div>
@@ -3107,49 +3106,33 @@ async function gsGet(){
   const json=await res.json();
   return json.data||{};
 }
-async function gsSet(key,value){
-  // no-cors avoids the preflight Apps Script can't answer; response is opaque, so we assume success
-  await fetch(wlEndpoint(),{ method:'POST', mode:'no-cors', headers:{'Content-Type':'text/plain'}, body:JSON.stringify({key,value}) });
-}
-/* ---- safety layer (2026-11 fix for lost whitelist rows) ----
-   Old behaviour: Save overwrote the WHOLE cloud list with this tab's copy. Rows were lost when
-   (a) a colleague saved in between (stale tab overwrote their rows), or
-   (b) the initial load failed / was still running, so the tab saved an almost-empty list.
-   Now: Save is blocked until a load has succeeded; Save re-reads the cloud and does a 3-way merge
-   (cloud-now vs. what this tab loaded vs. this tab's edits); large shrinks need confirmation;
-   the write is verified by reading it back; every cloud snapshot is backed up in localStorage. */
-let wlBase = null;          // Map key -> entry, the cloud list as this tab last loaded/saved it (null = never loaded OK)
+/* ---- saving (2026-11 fix for lost whitelist rows) ----
+   The page never sends the whole list. It sends only what this user changed (add / set / del,
+   each with the value the user saw), and the Apps Script applies it under a lock, field by field,
+   against the current sheet. So simultaneous saves can't overwrite each other, a colleague's
+   review can't be wiped by someone editing a different field, and a row someone just reviewed
+   is never deleted. Changing a reviewed row's UUID/DocNo. or Reason clears Reviewed (re-review). */
+let wlBase = null;          // Map key -> entry: the cloud list as this page last saw it (null = never loaded)
 let wlLoading = false;
 const wlKeyOf = w => normUuid(String((w&&w.uuid)||'').trim()).toUpperCase();
 const wlSame  = (a,b) => a.uuid===b.uuid && a.reason===b.reason && a.reviewed===b.reviewed;
 function wlToMap(list){ const m=new Map(); for(const w of list){ const e=wlNormalizeEntry(w); const k=wlKeyOf(e); if(k && !m.has(k)) m.set(k,e); } return m; }
-function wlIsDirty(){
-  if(!wlBase) return false;
-  const cur=wlToMap(whitelist.filter(w=>String(w.uuid||'').trim()));
-  return cur.size!==wlBase.size || [...cur].some(([k,v])=>!wlBase.has(k)||!wlSame(v,wlBase.get(k)));
+function wlLocalRows(){ return whitelist.filter(w=>String(w.uuid||'').trim()).map(wlNormalizeEntry); }
+function wlDiff(){                                   // -> {ops, dups}
+  const base=wlBase||new Map(), seen=new Map(), dups=[];
+  for(const w of wlLocalRows()){ const k=wlKeyOf(w); if(seen.has(k)) dups.push(w.uuid); else seen.set(k,w); }
+  const ops=[];
+  for(const [k,l] of seen){
+    const b=base.get(k);
+    if(!b) ops.push({op:'add', row:l});
+    else if(l.reason!==b.reason || l.reviewed!==b.reviewed)
+      ops.push({op:'set', key:b.uuid, from:{reason:b.reason, reviewed:b.reviewed}, to:{reason:l.reason, reviewed:l.reviewed}});
+  }
+  for(const [k,b] of base) if(!seen.has(k)) ops.push({op:'del', key:b.uuid, expect:b});
+  return {ops, dups};
 }
-function wlSetSaveEnabled(){ const b=document.getElementById('wlSave'); if(b) b.disabled = wlLoading || !wlBase; }
-const WL_BK_KEY='wlBackups_v1';
-function wlBackup(tag,list){
-  try{
-    const arr=JSON.parse(localStorage.getItem(WL_BK_KEY)||'[]');
-    const last=arr[arr.length-1];
-    const json=JSON.stringify(list);
-    if(last && last.json===json) return;                 // skip identical consecutive snapshots
-    arr.push({at:new Date().toISOString(), tag, n:list.length, json});
-    while(arr.length>30) arr.shift();
-    localStorage.setItem(WL_BK_KEY, JSON.stringify(arr));
-  }catch(e){ /* storage unavailable - ignore */ }
-}
-function wlDownloadBackups(){
-  let arr=[]; try{ arr=JSON.parse(localStorage.getItem(WL_BK_KEY)||'[]'); }catch(e){}
-  const out=arr.map(b=>({at:b.at, tag:b.tag, count:b.n, whitelist:JSON.parse(b.json)}));
-  out.push({at:new Date().toISOString(), tag:'current-screen', count:whitelist.length, whitelist});
-  const blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
-  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
-  a.download='whitelist-backups-'+new Date().toISOString().slice(0,10)+'.json'; a.click();
-  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
-}
+function wlIsDirty(){ return wlDiff().ops.length>0; }
+function wlSetSaveEnabled(){ const b=document.getElementById('wlSave'); if(b) b.disabled = wlLoading; }
 async function gsGetList(){
   const data=await gsGet();
   const arr=data[WL_KEY];
@@ -3157,71 +3140,69 @@ async function gsGetList(){
   if(!Array.isArray(arr)) throw new Error('cloud value for "'+WL_KEY+'" is not a list ('+typeof arr+')');
   return arr.map(wlNormalizeEntry);
 }
+function wlApplyCloud(list){ whitelist=list.map(w=>({...w})); wlBase=wlToMap(list); renderWhitelist(); }
 async function loadWhitelistFromCloud(){
   wlLoading=true; wlSetSaveEnabled();
-  wlSync('loading','Loading\u2026'); wlSetStatus('');
+  wlSync('loading','Loading…'); wlSetStatus('');
   try{
-    const list=await gsGetList();
-    whitelist=list.map(w=>({...w}));
-    wlBase=wlToMap(list);
-    wlBackup('load',list);
-    renderWhitelist();
-    wlSync('ok','Cloud sync OK \u00b7 '+wlApprovedCount()+' approved \u00b7 '+list.length+' rows');
+    wlApplyCloud(await gsGetList());
+    wlSync('ok','Cloud sync OK · '+wlApprovedCount()+' approved · '+whitelist.length+' rows');
   }catch(e){
-    wlSync('err','Cloud unavailable \u2014 offline');
-    wlSetStatus('Couldn\u2019t load the shared list ('+e.message+'). Saving is disabled until Reload succeeds, so an incomplete list can\u2019t overwrite the cloud.','bad');
+    wlSync('err','Cloud unavailable — offline');
+    wlSetStatus('Couldn’t load the shared list ('+e.message+'). New rows you add can still be saved (they are only added, never overwrite anything).','bad');
   }finally{ wlLoading=false; wlSetSaveEnabled(); }
 }
-/* 3-way merge. local wins for rows this tab added/edited/deleted; rows added or changed by others are kept. */
-function wlMerge(cloudNow, base, localList){
-  const C=wlToMap(cloudNow), L=wlToMap(localList), out=new Map(), conflicts=[];
-  for(const [k,l] of L){
-    const b=base.get(k), c=C.get(k);
-    if(b && c && wlSame(l,b) && !wlSame(c,b)) out.set(k,c);        // untouched here, edited elsewhere -> take theirs
-    else { if(b && c && !wlSame(l,b) && !wlSame(c,b) && !wlSame(l,c)) conflicts.push(k); out.set(k,l); }
+/* POST the change set. Apps Script answers a text/plain POST with CORS headers, so the result
+   (conflicts + the list after the change) is readable. If a browser blocks that, fall back to
+   no-cors and check the outcome by reading the list back. */
+async function gsApply(ops){
+  const body=JSON.stringify({key:WL_KEY, ops});
+  try{
+    const res=await fetch(wlEndpoint(),{ method:'POST', headers:{'Content-Type':'text/plain'}, body });
+    const j=await res.json();
+    if(!j || j.ok!==true) throw Object.assign(new Error((j&&j.error)||'save rejected'),{server:true});
+    return {list:((j.data||{})[WL_KEY]||[]).map(wlNormalizeEntry), conflicts:j.conflicts||[], applied:j.applied};
+  }catch(e){
+    if(e.server) throw e;
+    await fetch(wlEndpoint(),{ method:'POST', mode:'no-cors', headers:{'Content-Type':'text/plain'}, body });
+    const list=await gsGetList(), C=wlToMap(list), conflicts=[];
+    for(const o of ops){
+      const k=wlKeyOf(o.op==='add'?o.row:{uuid:o.key}), c=C.get(k);
+      if(o.op==='add' && !(c && wlSame(c,wlNormalizeEntry(o.row)))) conflicts.push({key:o.row.uuid, why:'not saved as entered'});
+      if(o.op==='del' && c) conflicts.push({key:o.key, why:'not deleted'});
+      if(o.op==='set' && !(c && c.reason===o.to.reason && c.reviewed===o.to.reviewed)) conflicts.push({key:o.key, why:'change not applied'});
+    }
+    return {list, conflicts, applied:null};
   }
-  for(const [k,c] of C){
-    if(out.has(k)) continue;
-    const b=base.get(k);
-    if(!b) out.set(k,c);                                           // added by someone else -> keep
-    else if(!wlSame(c,b)) { out.set(k,c); conflicts.push(k); }     // deleted here but edited elsewhere -> keep theirs
-    /* else: deleted here, untouched elsewhere -> drop */
-  }
-  return {list:[...out.values()], conflicts};
 }
 async function saveWhitelistToCloud(){
-  if(!wlBase){ wlSetStatus('Load the shared list first (press Reload) \u2014 saving without it would overwrite colleagues\u2019 rows.','bad'); return; }
+  const {ops, dups}=wlDiff();
+  if(dups.length){ wlSetStatus('Duplicate UUID / DocNo. on the list: '+dups.join(', ')+'. Remove the duplicates, then save.','bad'); return; }
+  if(!ops.length){ wlSetStatus('Nothing to save — no changes.',''); return; }
+  const dels=ops.filter(o=>o.op==='del');
+  if(dels.length>=5 && !confirm('This save deletes '+dels.length+' rows from the shared whitelist:\n'+dels.slice(0,10).map(o=>o.key).join('\n')+(dels.length>10?'\n…':'')+'\n\nContinue?')){
+    wlSetStatus('Nothing was saved.',''); return;
+  }
   const btn=document.getElementById('wlSave'), orig=btn.innerHTML;
-  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Saving\u2026';
-  wlSync('loading','Saving\u2026'); wlSetStatus('');
+  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Saving…';
+  wlSync('loading','Saving…'); wlSetStatus('');
   try{
-    const local=whitelist.filter(w=>String(w.uuid||'').trim()!=='').map(wlNormalizeEntry);
-    const cloudNow=await gsGetList();                     // fresh read right before writing
-    wlBackup('pre-save cloud',cloudNow);
-    const {list:merged, conflicts}=wlMerge(cloudNow, wlBase, local);
-    const cMap=wlToMap(cloudNow), mKeys=new Set(merged.map(wlKeyOf));
-    const removedKeys=[...cMap.keys()].filter(k=>!mKeys.has(k));
-    if(removedKeys.length>=5 || (cMap.size>=10 && merged.length < cMap.size*0.8)){
-      if(!confirm('This save would remove '+removedKeys.length+' row(s) from the shared whitelist ('+cMap.size+' \u2192 '+merged.length+'):\n'+removedKeys.slice(0,10).join('\n')+(removedKeys.length>10?'\n\u2026':'')+'\n\nContinue?')){
-        wlSync('ok','Save cancelled'); wlSetStatus('Nothing was saved.',''); return;
-      }
-    }
-    await gsSet(WL_KEY, merged);
-    // no-cors gives no response, so read back to confirm the write really landed
-    const check=await gsGetList();
-    const C=wlToMap(check), missing=merged.filter(m=>{ const c=C.get(wlKeyOf(m)); return !c || !wlSame(c,m); });
-    whitelist=check.map(w=>({...w})); wlBase=wlToMap(check); wlBackup('post-save',check); renderWhitelist();
-    if(missing.length){
-      wlSync('err','Save NOT confirmed');
-      wlSetStatus('The cloud did not keep '+missing.length+' row(s) (e.g. '+missing.slice(0,3).map(m=>m.uuid).join(', ')+'). The store may have hit a size limit or rejected the write \u2014 use \u201cDownload backups\u201d and check the Apps Script.','bad');
+    const r=await gsApply(ops);
+    wlApplyCloud(r.list);                               // screen = cloud after the change (includes colleagues' rows)
+    if(r.conflicts.length){
+      wlSync('err','Saved with conflicts');
+      const el=document.getElementById('wlStatus'); el.className='wl-status'; el.textContent='';
+      const w=document.createElement('span'); w.style.cssText='color:var(--err);font-weight:700';
+      w.textContent='Saved, but '+r.conflicts.length+' change(s) were NOT applied because someone else changed the same row first — check and redo if needed: '+
+        r.conflicts.map(c=>c.key+' ('+c.why+')').join('; ');
+      el.appendChild(w);
     } else {
-      wlSync('ok','Saved \u2713 '+new Date().toLocaleTimeString()+' \u00b7 '+check.length+' rows');
-      const others=check.length-local.length;
-      wlSetStatus('Saved and verified. '+(others>0?others+' row(s) added by colleagues were kept. ':'')+(conflicts.length?'Edited by both you and someone else (yours kept): '+conflicts.join(', '):''),'ok');
+      wlSync('ok','Saved ✓ '+new Date().toLocaleTimeString()+' · '+whitelist.length+' rows');
+      wlSetStatus('Saved ('+ops.length+' change'+(ops.length>1?'s':'')+'). The list now shows the latest cloud copy, including colleagues’ changes.','ok');
     }
   }catch(e){
     wlSync('err','Save failed');
-    wlSetStatus('Save failed: '+e.message+'. Nothing was overwritten blindly \u2014 try Reload, then save again.','bad');
+    wlSetStatus('Save failed: '+e.message+'. Nothing was changed in the cloud — your edits are still on screen; try Save again.','bad');
   }finally{ btn.innerHTML=orig; wlSetSaveEnabled(); }
 }
 (function wireWhitelist(){
@@ -3234,7 +3215,15 @@ async function saveWhitelistToCloud(){
   document.getElementById('wlfReason').addEventListener('input', applyWlFilter);
   document.getElementById('wlfRev').addEventListener('change', applyWlFilter);
   const body=document.getElementById('wlBody');
-  body.addEventListener('input', e=>{ const t=e.target; if(t.dataset && (t.dataset.f==='uuid'||t.dataset.f==='reason')){ whitelist[+t.dataset.i][t.dataset.f]=t.value; if(t.dataset.f==='uuid'){ wlUpdateCount(); applyWlFilter(); } } });
+  body.addEventListener('input', e=>{ const t=e.target; if(t.dataset && (t.dataset.f==='uuid'||t.dataset.f==='reason')){
+    const i=+t.dataset.i, row=whitelist[i];
+    row[t.dataset.f]=t.value;
+    if(row.reviewed){                                  // content changed -> review is void, needs re-review
+      row.reviewed=false;
+      const cb=t.closest('tr').querySelector('[data-f="reviewed"]'); if(cb) cb.checked=false;
+      wlSetStatus('Reviewed was cleared because the UUID / DocNo. or reason changed — it needs to be reviewed again.','bad');
+    }
+    wlUpdateCount(); applyWlFilter(); } });
   body.addEventListener('change', e=>{ const t=e.target; if(t.dataset && t.dataset.f==='reviewed'){ whitelist[+t.dataset.i].reviewed=t.checked; wlUpdateCount(); applyWlFilter(); } });
   body.addEventListener('click', e=>{ const b=e.target.closest('.wl-del'); if(b){ whitelist.splice(+b.dataset.del,1); renderWhitelist(); } });
   document.getElementById('wlAdd').addEventListener('click', ()=>{
@@ -3247,7 +3236,6 @@ async function saveWhitelistToCloud(){
   document.getElementById('wlReload').addEventListener('click', ()=>{
     if(wlIsDirty() && !confirm('Reload replaces what is on screen with the cloud copy. Unsaved edits here will be lost. Continue?')) return;
     loadWhitelistFromCloud(); });
-  document.getElementById('wlBackups').addEventListener('click', wlDownloadBackups);
   window.addEventListener('beforeunload', e=>{
     if(wlIsDirty()){ e.preventDefault(); e.returnValue=''; }
   });
@@ -3258,35 +3246,41 @@ async function saveWhitelistToCloud(){
 wireDrop('dropNcc','fileNcc','nameNcc','metaNcc','clearNcc','ncc');
 wireDrop('dropCfdi','fileCfdi','nameCfdi','metaCfdi','clearCfdi','cfdi');
 
-/* Before every Run, pull the latest shared whitelist so rows a colleague just added take effect.
-   No local edits -> use the cloud copy as-is. Unsaved local edits -> merge (local edits kept, colleagues' rows added).
-   Cloud unreachable / slow -> run with the list on screen and say so. */
+/* Run rules for the whitelist:
+   - unsaved whitelist edits on screen -> Run is blocked (red, bold message) until Save to Cloud;
+   - otherwise pull the latest shared whitelist first, so rows a colleague just added take effect. */
+function wlBlockRunIfUnsaved(){
+  if(!wlIsDirty()) return false;
+  document.getElementById('wlCard').classList.add('open');
+  document.getElementById('wlToggle').setAttribute('aria-expanded','true');
+  const el=document.getElementById('wlStatus'); el.className='wl-status'; el.textContent='';
+  const w=document.createElement('span');
+  w.style.cssText='color:var(--err);font-weight:700';
+  w.textContent='You still have unsaved edits here \u2014 press Save to Cloud to share them. Run is blocked until the whitelist is saved.';
+  el.appendChild(w);
+  wlSync('err','Unsaved changes');
+  if(el.scrollIntoView) el.scrollIntoView({behavior:'smooth',block:'center'});
+  return true;
+}
 async function wlRefreshBeforeRun(){
   const timeout=new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),15000));
   try{
     const cloudNow=await Promise.race([gsGetList(), timeout]);
-    wlBackup('pre-run',cloudNow);
     const before=new Set(whitelist.map(wlKeyOf).filter(Boolean));
-    if(!wlBase || !wlIsDirty()){
-      whitelist=cloudNow.map(w=>({...w}));
-    } else {
-      whitelist=wlMerge(cloudNow, wlBase, whitelist.filter(w=>String(w.uuid||'').trim()).map(wlNormalizeEntry)).list.map(w=>({...w}));
-    }
-    wlBase=wlToMap(cloudNow);                      // unsaved local edits stay "dirty" relative to the new base
+    whitelist=cloudNow.map(w=>({...w})); wlBase=wlToMap(cloudNow);
     renderWhitelist(); wlSetSaveEnabled();
     const added=whitelist.filter(w=>!before.has(wlKeyOf(w))).length;
     wlSync('ok','Synced before run \u00b7 '+wlApprovedCount()+' approved \u00b7 '+whitelist.length+' rows');
-    wlSetStatus('Run used the latest shared whitelist'+(added?' \u2014 '+added+' new row(s) from colleagues applied':'')+(wlIsDirty()?'. You still have unsaved edits here \u2014 press Save to Cloud to share them.':'.'),'ok');
-    return true;
+    wlSetStatus('Run used the latest shared whitelist'+(added?' \u2014 '+added+' new row(s) from colleagues applied':'')+'.','ok');
   }catch(e){
     wlSync('err','Not synced');
     wlSetStatus('Couldn\u2019t refresh the whitelist before this run ('+e.message+'). Results use the list on screen, which may miss rows colleagues added recently.','bad');
-    return false;
   }
 }
 document.getElementById('runBtn').addEventListener('click', async ()=>{
-  const btn=document.getElementById('runBtn'), orig=btn.innerHTML;
   clearError();
+  if(wlBlockRunIfUnsaved()) return;
+  const btn=document.getElementById('runBtn'), orig=btn.innerHTML;
   btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Syncing whitelist\u2026';
   try{ await wlRefreshBeforeRun(); }
   finally{ btn.disabled=false; btn.innerHTML=orig; }
