@@ -3258,8 +3258,38 @@ async function saveWhitelistToCloud(){
 wireDrop('dropNcc','fileNcc','nameNcc','metaNcc','clearNcc','ncc');
 wireDrop('dropCfdi','fileCfdi','nameCfdi','metaCfdi','clearCfdi','cfdi');
 
-document.getElementById('runBtn').addEventListener('click',()=>{
+/* Before every Run, pull the latest shared whitelist so rows a colleague just added take effect.
+   No local edits -> use the cloud copy as-is. Unsaved local edits -> merge (local edits kept, colleagues' rows added).
+   Cloud unreachable / slow -> run with the list on screen and say so. */
+async function wlRefreshBeforeRun(){
+  const timeout=new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),15000));
+  try{
+    const cloudNow=await Promise.race([gsGetList(), timeout]);
+    wlBackup('pre-run',cloudNow);
+    const before=new Set(whitelist.map(wlKeyOf).filter(Boolean));
+    if(!wlBase || !wlIsDirty()){
+      whitelist=cloudNow.map(w=>({...w}));
+    } else {
+      whitelist=wlMerge(cloudNow, wlBase, whitelist.filter(w=>String(w.uuid||'').trim()).map(wlNormalizeEntry)).list.map(w=>({...w}));
+    }
+    wlBase=wlToMap(cloudNow);                      // unsaved local edits stay "dirty" relative to the new base
+    renderWhitelist(); wlSetSaveEnabled();
+    const added=whitelist.filter(w=>!before.has(wlKeyOf(w))).length;
+    wlSync('ok','Synced before run \u00b7 '+wlApprovedCount()+' approved \u00b7 '+whitelist.length+' rows');
+    wlSetStatus('Run used the latest shared whitelist'+(added?' \u2014 '+added+' new row(s) from colleagues applied':'')+(wlIsDirty()?'. You still have unsaved edits here \u2014 press Save to Cloud to share them.':'.'),'ok');
+    return true;
+  }catch(e){
+    wlSync('err','Not synced');
+    wlSetStatus('Couldn\u2019t refresh the whitelist before this run ('+e.message+'). Results use the list on screen, which may miss rows colleagues added recently.','bad');
+    return false;
+  }
+}
+document.getElementById('runBtn').addEventListener('click', async ()=>{
+  const btn=document.getElementById('runBtn'), orig=btn.innerHTML;
   clearError();
+  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Syncing whitelist\u2026';
+  try{ await wlRefreshBeforeRun(); }
+  finally{ btn.disabled=false; btn.innerHTML=orig; }
   try{ render(analyze()); }
   catch(err){ showError(err.message); }
 });
