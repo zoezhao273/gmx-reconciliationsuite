@@ -1840,7 +1840,7 @@ main{ padding:18px 0 64px }
         <div class="card check"><div class="num">Check 1</div><h4>Duplicate UUIDs</h4>
           <p>Runs first. When a real UUID appears on more than one record, it tells two cases apart automatically: equal partial shares that sum within the invoice total (or a <code>Bank Charges</code> item, <code>PPD</code> payment) are treated as an <b>amortized invoice</b> &mdash; expected, with total/VAT/month relaxed. Full-amount repeats are flagged as <b>possible duplicate reimbursement</b>. Placeholder UUIDs (<code>-</code>, <code>NA</code>, free text for no-invoice items) and repeats within one record are never counted as duplicates.</p></div>
         <div class="card check"><div class="num">Check 2</div><h4>Valid UUID</h4>
-          <p>A UUID is valid only when it satisfies <b>both</b> conditions: (1) it <b>exists</b> in the CFDI file, and (2) the matched invoice's <code>Estatus</code> is exactly <code>Vigente</code>. A stray <code>:</code> prefix, spaces, or unusual dashes are tolerated; anything still unmatched is flagged as <b>not found</b>. If the UUID is found but its status is not <code>Vigente</code> (e.g. <code>Cancelado</code>), the line is flagged &mdash; the <b>CFDI</b> column shows the actual status and the <b>NCC</b> column shows the UUID &mdash; and all downstream checks (gas / total / VAT / FX / withholding / cash) are skipped because the invoice is already invalid. A line whose <code>Material = Non-Deductible Expense</code> is exempt from the <b>not-found</b> case only &mdash; these legitimately have no CFDI; a non-<code>Vigente</code> status is flagged regardless of material. If the CFDI file carries no status at all, the Vigente sub-check is silently skipped.</p></div>
+          <p>A UUID is valid only when it satisfies <b>both</b> conditions: (1) it <b>exists</b> in the CFDI file, and (2) the matched invoice's <code>Estatus</code> is exactly <code>Vigente</code>. A stray <code>:</code> prefix, spaces, or unusual dashes are tolerated; anything still unmatched is flagged as <b>not found</b>. If the UUID is found but its status is not <code>Vigente</code> (e.g. <code>Cancelado</code>), the line is flagged &mdash; the <b>CFDI</b> column shows the actual status and the <b>NCC</b> column shows the UUID &mdash; and all downstream checks (gas / total / VAT / FX / withholding / cash) are skipped because the invoice is already invalid. A line whose <code>Material</code> contains <code>Non-Deductible Expense</code> is exempt from the <b>not-found</b> case &mdash; these legitimately may have no CFDI; a non-<code>Vigente</code> status is flagged regardless of material. If the CFDI file carries no status at all, the Vigente sub-check is silently skipped.</p></div>
         <div class="card check"><div class="num">Check 3</div><h4>Posting month</h4>
           <p>NCC <code>DocDate</code> month must equal CFDI <code>Emisión</code> month. Run only when the record is <code>DocNo</code> starting with <code>AP</code> <i>and</i> <code>A/PType = CA Reimbursement</code>, or when the supplier contains <code>PETTY CASH</code>.<br>Also, on every main-table record, the <code>* VoucherPeriod</code> (mm) must equal the month of <code>* DocDate</code> (yyyy-mm-dd); a mismatch is flagged as <i>Wrong voucher period</i>.</p></div>
         <div class="card check"><div class="num">Check 4</div><h4>Gas material</h4>
@@ -1859,7 +1859,7 @@ main{ padding:18px 0 64px }
         <div class="card check"><div class="num">Check 9</div><h4>Cash payment</h4>
           <p>Runs only for invoices whose CFDI <code>Total Original XML &gt; $2,000</code>. If the CFDI <code>Forma Pago = 01</code> (Efectivo / cash), the line is flagged <b>"Please verify payment method at first. If paid via cash, select 'Non-Deductible Expense' for payments &gt; $2,000"</b>; the <b>CFDI</b> column shows the <code>Forma de Pago</code> value and the <b>NCC</b> column is left blank. (Gasoline is no longer handled here &mdash; see Check 4.)</p></div>
         <div class="card check"><div class="num">Note</div><h4>Exemptions</h4>
-          <p>Skipped entirely: records whose supplier is <code>GREE AIRCONDITIONING MEXICO</code> or <code>CDMX GOV</code> (salary / tax) or <code>MEXICO CUSTOMS</code> (Pedimento / customs fees); <code>PY</code> documents whose <code>PmtType</code> is <code>Cash Advance Payment</code> or <code>Cash Avance Return</code> (not invoice related); and any valid line (UUID found &amp; <code>Vigente</code>) booked as <code>Non-Deductible Expense</code> whose CFDI <code>Forma de Pago = 01</code> (cash) &mdash; nothing left to reconcile. The issuer-RFC check is also not run.</p></div>
+          <p>Skipped entirely: records whose supplier is <code>GREE AIRCONDITIONING MEXICO</code>, <code>CDMX GOV</code>, <code>MTY GOV</code>, <code>Northern GOV</code> or <code>Southern GOV</code> (salary / tax) or <code>MEXICO CUSTOMS</code> (Pedimento / customs fees); <code>PY</code> documents whose <code>PmtType</code> is <code>Cash Advance Payment</code> or <code>Cash Avance Return</code> (not invoice related); and any valid invoice (UUID found &amp; <code>Vigente</code>) whose lines in the record are all booked as <code>Non-Deductible Expense</code>, whatever the <code>Forma de Pago</code> &mdash; nothing is deducted, so month / gas / total / VAT / FX / cash checks are skipped. A <code>Non-Deductible Expense</code> line is still flagged if its invoice is not <code>Vigente</code>. The issuer-RFC check is also not run.</p></div>
       </div>
       <div class="datebox">
         <b>About CFDI dates.</b> The <code>Emisión</code> column is a fixed <b>DD/MM/YYYY</b> (day-first) text format and is parsed directly &mdash; no per-file format detection. Only the year and month are used for the posting-month check.
@@ -2406,7 +2406,7 @@ function analyze(){
 
   // exemptions from ALL checks
   const approved=approvedSets();                                         // reviewed whitelist (UUIDs + DocNos)
-  const EXEMPT_SUP=['gree airconditioning mexico','cdmx gov','mexico customs'];   // salary / tax / Pedimento (customs) fees
+  const EXEMPT_SUP=['gree airconditioning mexico','cdmx gov','mty gov','northern gov','southern gov','mexico customs'];   // salary / tax / Pedimento (customs) fees
   const PY_EXEMPT_TYPE=['cash advance payment','cash avance return'];     // PY cash advances — not invoice related
   const main={};
   for(let i=mainHdr+1;i<bodyHdr;i++){
@@ -2490,7 +2490,7 @@ function analyze(){
     if(nu==='') continue;
     if(approved.uuids.has(nu)) continue;    // approved whitelist UUID: exempt from all checks
     if(!isUuidFormat(nu)) continue;   // '-', 'NA', 'Taxi'… are placeholders for no-invoice items, never a real duplicate
-    if((main[d.seq]||{}).exempt) continue;          // GREE / CDMX GOV records are exempt from all checks
+    if((main[d.seq]||{}).exempt) continue;          // GREE / * GOV records are exempt from all checks
     const isW=String(d.vatcode||'').trim()===WHT_CODE;
     if(!byU[nu]) byU[nu]={};
     if(!byU[nu][d.seq]){
@@ -2579,14 +2579,14 @@ function analyze(){
   const groups={};   // key -> {seq,docno,reimb,nu, lines:[]}
   for(const d of details){
     const m=main[d.seq]||{};
-    if(m.exempt) continue;                          // GREE / CDMX GOV: exempt from all checks
+    if(m.exempt) continue;                          // GREE / * GOV: exempt from all checks
     const nu=normUuid(d.uuidRaw);
     if(approved.uuids.has(nu)) continue;                  // approved whitelist UUID: exempt from all checks
     const isWht=String(d.vatcode||'').trim()===WHT_CODE;
     const mat=d.material!=null?String(d.material).trim():'';
     if(!(nu in cfdi)){
       // Material = Non-Deductible Expense + invalid UUID is an accepted case (no CFDI expected)
-      if(mat.toLowerCase()!==NON_DEDUCTIBLE)
+      if(!mat.toLowerCase().includes(NON_DEDUCTIBLE))
         push({seq:d.seq,row:d.excelRow,docno:m.docno||'',reimb:m.reimb,material:mat,
               check:'uuid',reason:'UUID not found in the CFDI file',cfdi:'Not found',
               ncc:(d.uuidRaw===null?'(blank)':String(d.uuidRaw)), uuid:(d.uuidRaw===null?'(blank)':String(d.uuidRaw)), status:''});
@@ -2634,11 +2634,11 @@ function analyze(){
     const mat=matLabel(g.lines);
     const base={seq:g.seq,row:g.lines[0].excelRow,docno:g.docno,reimb:g.reimb,material:mat,uuid:c.rawUuid,status:c.estatus};
 
-    // Exemption: a cash-paid line (CFDI Forma Pago = 01) correctly booked as Non-Deductible
-    // Expense on a valid invoice (UUID found + Vigente — already guaranteed for any group that
-    // reaches Pass B) is exempt from EVERY check. There is nothing left to reconcile.
+    // Exemption: a group booked entirely as Non-Deductible Expense on a valid invoice (UUID found
+    // + Vigente — already guaranteed for any group that reaches Pass B) is exempt from EVERY
+    // remaining check, whatever the Forma de Pago. Nothing is deducted, so nothing to reconcile.
     const formaIsCash = /^0*1\b/.test(String(c.formaPago||'').trim());   // matches "1", "01", "01 Efectivo"
-    if(formaIsCash && g.lines.every(l=>String(l.material||'').toLowerCase().includes(NON_DEDUCTIBLE))) continue;
+    if(g.lines.every(l=>String(l.material||'').toLowerCase().includes(NON_DEDUCTIBLE))) continue;
 
     // month — only for AP + CA Reimbursement records, or suppliers containing PETTY CASH
     const docPrefix=String(g.docno||'').trim().toUpperCase();
