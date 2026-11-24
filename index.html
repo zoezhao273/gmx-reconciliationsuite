@@ -1976,7 +1976,7 @@ main{ padding:18px 0 64px }
     <h3>How it works</h3>
     <ul class="step-list">
       <li><div class="step-num">1</div><span>Upload the <strong>Settlement Detail</strong> — required. Then upload whichever document details your settlements reference: A/P, Payment, A/R, Collection.</span></li>
-      <li><div class="step-num">2</div><span><strong>Type match:</strong> each settlement group must pair correctly — <code>D1</code>/<code>F1-Cxx-01</code> with <code>D3</code>; <code>F1-Cxx-03</code> with <code>F3-Cxx-001</code>/<code>F3-Cxx-002</code>; <code>D0</code> with <code>D2</code>; <code>D0</code> with <code>D1</code> (tax check skipped). Anything else is a type mismatch.</span></li>
+      <li><div class="step-num">2</div><span><strong>Type match:</strong> each settlement group must pair correctly — <code>D1</code>/<code>F1-Cxx-01</code> with <code>D3</code>; <code>F1-Cxx-01</code> with <code>F3-Cxx-001</code>; <code>F1-Cxx-03</code> with <code>F3-Cxx-001</code>/<code>F3-Cxx-002</code>; <code>D0</code> with <code>D2</code>; <code>D0</code> with <code>D1</code> (tax check skipped). Anything else is a type mismatch.</span></li>
       <li><div class="step-num">3</div><span><strong>Tax equal:</strong> the settled portion's VAT on each side must offset exactly. Partial settlements are handled by prorating VAT to the settled amount, so a half-paid invoice is not falsely flagged.</span></li>
       <li><div class="step-num">4</div><span><strong>Exemptions:</strong> GREE-supplier (payroll) groups, borrow-reimbursement groups, and <code>D0</code>/<code>D1</code> groups are checked for type only. <code>Realized Ex. Gain/Loss</code> and <code>Discount Settlement</code> schemes are skipped entirely.</span></li>
       <li><div class="step-num">5</div><span><strong>MXN</strong> groups allow zero tax difference; <strong>USD/CNY</strong> groups may differ (invoice-date vs settlement-date rate) — the gap is reported, not errored. Documents referenced by the settlement file but absent from the uploaded details raise a <strong>Missing detail</strong> warning and that group is skipped.</span></li>
@@ -2228,7 +2228,7 @@ main{ padding:18px 0 64px }
   </section>
 </main>
 
-<footer>Runs entirely in your browser &middot; no file ever leaves your computer. &middot; <span id="buildStamp" style="opacity:.6">Build 2026-11-12</span></footer>
+<footer>Runs entirely in your browser &middot; no file ever leaves your computer. &middot; <span id="buildStamp" style="opacity:.6">Build 2026-11-24</span></footer>
 
 <script>
 const WHT_CODE = 'PresetWHTL0 Donot used';
@@ -4479,7 +4479,8 @@ function diotDownloadXlsx(){
    Settlement Reconciliation (step 2)  —  self-contained IIFE
    Cross-checks NCC settlement links between AP/PY and AR/RC
    documents. Two goals:
-     (1) Type match  — D1/F1-Cxx-01 <-> D3 ; F1-Cxx-03 <-> F3-Cxx-001/002 ;
+     (1) Type match  — D1/F1-Cxx-01 <-> D3 ; F1-Cxx-01 <-> F3-Cxx-001 ;
+                        F1-Cxx-03 <-> F3-Cxx-001/002 ;
                         D0 <-> D2 ; D0 <-> D1 (VAT check skipped).
                         Any other pairing is a mismatch.
      (2) Tax equal   — the settled portion's VATAmt(FC) on the debit side
@@ -4713,14 +4714,21 @@ function diotDownloadXlsx(){
       if(onlyIncome && has('D0') && has('D2')) return {ok:true, kind:'income'};
       return {ok:false, kind:'income', reason:'D0/D2 group mixed with an incompatible type'};
     }
+    // F1-Cxx-01 + F3-Cxx-001 only (both present, nothing else) -> valid, VAT checked
+    if(has('F1-CXX-01') && has('F3-CXX-001') && types.every(function(t){ return t==='F1-CXX-01'||t==='F3-CXX-001'; })){
+      return {ok:true, kind:'f1f3'};
+    }
+
     var direct = any(['D1','F1-CXX-01']);
     var borrow = has('F1-CXX-03');
     var d3     = has('D3');
     var f3     = any(['F3-CXX-001','F3-CXX-002']);
-    if(direct && f3)      return {ok:false, kind:'expense', reason:'D1/F1-Cxx-01 must settle against D3, not F3-Cxx-001'};
+    if(has('D1') && f3)   return {ok:false, kind:'expense', reason:'D1 must settle against D3, not F3-Cxx-001/002'};
+    if(direct && has('F3-CXX-002')) return {ok:false, kind:'expense', reason:'F1-Cxx-01 may settle against D3 or F3-Cxx-001, not F3-Cxx-002'};
+    if(direct && f3)      return {ok:false, kind:'expense', reason:'F1-Cxx-01 settles against either D3 or F3-Cxx-001 \u2014 not both in one group'};
     if(borrow && d3)      return {ok:false, kind:'expense', reason:'F1-Cxx-03 must settle against F3-Cxx-001, not D3'};
-    if(direct && !d3)     return {ok:false, kind:'expense', reason:'D1/F1-Cxx-01 present without a matching D3'};
-    if(borrow && !f3)     return {ok:false, kind:'expense', reason:'F1-Cxx-03 present without a matching F3-Cxx-001'};
+    if(direct && !d3)     return {ok:false, kind:'expense', reason:'D1/F1-Cxx-01 present without a matching D3 (or F3-Cxx-001 for F1-Cxx-01)'};
+    if(borrow && !f3)     return {ok:false, kind:'expense', reason:'F1-Cxx-03 present without a matching F3-Cxx-001/002'};
     return {ok:true, kind:'expense'};
   }
 
@@ -4775,7 +4783,7 @@ function diotDownloadXlsx(){
       }
 
       var isGree   = sorted.some(function(d){ return docs[d].gree; });
-      var isBorrow = types.some(isBorrowType);
+      var isBorrow = tc.kind!=='f1f3' && types.some(isBorrowType);   // F1-Cxx-01<->F3-Cxx-001 is VAT-checked, not a borrow exemption
       if(isGree || isBorrow){
         tally.exempt++;
         push({ status:'exempt', docs:sorted, kind:tc.kind, cur:'', L:null, R:null, diff:null,
@@ -4794,6 +4802,8 @@ function diotDownloadXlsx(){
       var isD2 = function(d){ return docs[d].type==='D2'; };
       var isDebitSide, isCreditSide;
       if(tc.kind==='income'){ isDebitSide = isD0; isCreditSide = isD2; }
+      else if(tc.kind==='f1f3'){ isDebitSide  = function(d){ return docs[d].type==='F1-CXX-01'; };
+                                  isCreditSide = function(d){ return docs[d].type==='F3-CXX-001'; }; }
       else { isDebitSide = function(d){ var t=docs[d].type; return t==='D1'||t==='F1-CXX-01'; };
              isCreditSide = function(d){ return docs[d].type==='D3'; }; }
 
@@ -5018,7 +5028,7 @@ function diotDownloadXlsx(){
         '<tr><td colspan="9" class="s-clean">✓ No settlement groups need attention.'+
         (showAll?'':' (tick “Show all” to see pass / exempt groups)')+'</td></tr>';
     } else {
-      var kindZh = {income:'Income', expense:'Expense', '':''};
+      var kindZh = {income:'Income', expense:'Expense', f1f3:'Expense', '':''};
       var counts = {}; visible.forEach(function(r){ counts[r.status]=(counts[r.status]||0)+1; });
       var built = visible.map(function(r, idx){
         var collapsed = !!S.collapsed[r.status];
@@ -5102,7 +5112,7 @@ function diotDownloadXlsx(){
     S.result.rows.forEach(function(r){
       aoa.push([
         STATUS_LABEL[r.status]||r.status,
-        ({income:'Income',expense:'Expense','':''})[r.kind]||'',
+        ({income:'Income',expense:'Expense',f1f3:'Expense','':''})[r.kind]||'',
         (r.batches&&r.batches.length)?r.batches.join(', '):'',
         r.docs.join(', '),
         r.cur||'',
